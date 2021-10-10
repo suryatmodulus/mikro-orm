@@ -292,7 +292,33 @@ export class EntityManager<D extends IDatabaseDriver = IDatabaseDriver> {
     let entity = this.getUnitOfWork().tryGetById<T>(entityName, where);
     const isOptimisticLocking = !Utils.isDefined(options.lockMode) || options.lockMode === LockMode.OPTIMISTIC;
 
-    if (entity && entity.__helper!.__initialized && !options.refresh && isOptimisticLocking) {
+    // when the entity is found in identity map, we check if it was partially loaded or we are trying to populate
+    // some additional lazy properties, if so, we reload and merge the data from database
+    function shouldRefresh<T extends AnyEntity<T>>(meta: EntityMetadata<T>, entity: T, options: FindOneOptions<T>) {
+      if (!entity || !entity.__helper!.__initialized || options.refresh) {
+        return false;
+      }
+
+      let autoRefresh: boolean;
+
+      if (options.fields) {
+        autoRefresh = options.fields.some(field => !entity!.__helper!.__loadedProperties.has(field as string));
+      } else {
+        autoRefresh = meta.comparableProps.some(prop => !prop.lazy && !entity!.__helper!.__loadedProperties.has(prop.name));
+      }
+
+      if (autoRefresh) {
+        return true;
+      }
+
+      if (Array.isArray(options.populate)) {
+        return options.populate.some(field => !entity!.__helper!.__loadedProperties.has(field as string));
+      }
+
+      return !!options.populate;
+    }
+
+    if (entity && entity.__helper!.__initialized && !options.refresh && !shouldRefresh(meta, entity, options) && isOptimisticLocking) {
       return this.lockAndPopulate<T, P>(entityName, entity, where, options);
     }
 

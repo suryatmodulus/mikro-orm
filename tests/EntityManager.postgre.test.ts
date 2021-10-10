@@ -860,7 +860,7 @@ describe('EntityManagerPostgre', () => {
     await orm.em.persistAndFlush(bar);
     orm.em.clear();
 
-    const b1 = (await orm.em.findOne(FooBar2, { id: bar.id }, { populate: ['baz'], refresh: true }))!;
+    const b1 = (await orm.em.findOne(FooBar2, { id: bar.id }, { populate: ['baz'] }))!;
     expect(b1.baz).toBeInstanceOf(FooBaz2);
     expect(b1.baz!.id).toBe(baz.id);
     expect(wrap(b1).toJSON()).toMatchObject({ baz: { id: baz.id, bar: bar.id, name: 'baz' } });

@@ -11,7 +11,7 @@ import {
 } from '@mikro-orm/core';
 import { MySqlDriver, MySqlConnection } from '@mikro-orm/mysql';
 import { Author2, Book2, BookTag2, FooBar2, FooBaz2, Publisher2, PublisherType, Test2 } from './entities-sql';
-import { initORMMySql, wipeDatabaseMySql } from './bootstrap';
+import { initORMMySql, mockLogger, wipeDatabaseMySql } from './bootstrap';
 import { Author2Subscriber } from './subscribers/Author2Subscriber';
 import { EverythingSubscriber } from './subscribers/EverythingSubscriber';
 import { FlushSubscriber } from './subscribers/FlushSubscriber';
@@ -2407,10 +2407,10 @@ describe('EntityManagerMySql', () => {
   });
 
   test('refreshing already loaded entity', async () => {
-    const god = new Author2(`God `, `hello@heaven.god`);
-    new Book2(`Bible 1`, god);
-    new Book2(`Bible 2`, god);
-    new Book2(`Bible 3`, god);
+    const god = new Author2('God', 'hello@heaven.god');
+    new Book2('Bible 1', god);
+    new Book2('Bible 2', god);
+    new Book2('Bible 3', god);
     await orm.em.persistAndFlush(god);
     orm.em.clear();
 
@@ -2422,6 +2422,104 @@ describe('EntityManagerMySql', () => {
     expect(r2).toHaveLength(1);
     expect(r2[0].id).toBe(god.id);
     expect(r2[0].name).toBe(god.name);
+    expect(r1[0]).toBe(r2[0]);
+  });
+
+  test('auto-refreshing already loaded entity with em.find()', async () => {
+    const god = new Author2('God', 'hello@heaven.god');
+    new Book2('Bible 1', god);
+    new Book2('Bible 2', god);
+    new Book2('Bible 3', god);
+    await orm.em.persistAndFlush(god);
+    orm.em.clear();
+
+    const r1 = await orm.em.find(Author2, god, { fields: ['id'], populate: ['books'] });
+    r1[0].email = 'lol';
+    expect(r1).toHaveLength(1);
+    expect(r1[0].id).toBe(god.id);
+    expect(r1[0].name).toBeUndefined();
+    expect(r1[0].termsAccepted).toBeUndefined();
+    const r2 = await orm.em.find(Author2, god, { populate: ['books'] });
+    expect(r2).toHaveLength(1);
+    expect(r2[0].id).toBe(god.id);
+    expect(r2[0].name).toBe(god.name);
+    expect(r2[0].termsAccepted).toBe(false);
+    expect(r2[0].email).toBe('lol');
+    expect(r1[0]).toBe(r2[0]);
+
+    const mock = mockLogger(orm);
+    await orm.em.flush();
+    expect(mock.mock.calls[0][0]).toMatch('begin');
+    expect(mock.mock.calls[1][0]).toMatch(/update `author2` set `email` = 'lol', `updated_at` = '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}' where `id` = 1/);
+    expect(mock.mock.calls[2][0]).toMatch('commit');
+
+    // TODO test with joined strategy
+    // TODO test with relations
+  });
+
+  test('auto-refreshing already loaded entity with em.findOne()', async () => {
+    const god = new Author2('God', 'hello@heaven.god');
+    god.age = 999;
+    god.identities = ['a', 'b', 'c'];
+    const b1 = new Book2('Bible 1', god);
+    b1.perex = 'b1 perex';
+    const b2 = new Book2('Bible 2', god);
+    b2.perex = 'b2 perex';
+    const b3 = new Book2('Bible 3', god);
+    b3.perex = 'b3 perex';
+    await orm.em.persistAndFlush(god);
+    orm.em.clear();
+
+    const mock = mockLogger(orm);
+    const a1 = await orm.em.findOneOrFail(Author2, god, { fields: ['id', 'email'], populate: ['books'] });
+    expect(mock).toBeCalledTimes(2);
+    expect(a1.id).toBe(god.id);
+    expect(a1.email).toBe(god.email);
+    a1.email = 'lol';
+    expect(a1.name).toBeUndefined();
+    expect(a1.termsAccepted).toBeUndefined();
+    expect(a1.age).toBeUndefined();
+    expect(a1.identities).toBeUndefined();
+
+    // reloading with same fields won't fire the query
+    const a11 = await orm.em.findOneOrFail(Author2, god, { fields: ['email'] });
+    expect(a11).toBe(a1);
+    expect(mock).toBeCalledTimes(2);
+
+    // reloading with additional fields will work without `refresh: true`
+    const a12 = await orm.em.findOneOrFail(Author2, god, { fields: ['id', 'age'] });
+    expect(a12).toBe(a1);
+    expect(a1.age).toBe(999);
+    a1.age = 1000;
+    expect(mock).toBeCalledTimes(3);
+
+    // reloading without partial loading will work without `refresh: true`
+    const a2 = await orm.em.findOneOrFail(Author2, god, { populate: ['books'] });
+    expect(mock).toBeCalledTimes(4);
+    expect(a2.id).toBe(god.id);
+    expect(a2.name).toBe(god.name);
+    expect(a2.termsAccepted).toBe(false);
+    expect(a2.email).toBe('lol');
+    expect(a1).toBe(a2);
+
+    // no query should be fired as the entity was fully loaded before too
+    const b11 = await orm.em.findOneOrFail(Book2, b1.uuid, { filters: false });
+    expect(mock).toBeCalledTimes(4);
+    expect(b11).toBe(a1.books[0]);
+
+    // reloading with additional lazy scalar properties will work without `refresh: true`
+    const b12 = await orm.em.findOneOrFail(Book2, b1, { populate: ['perex'], filters: false });
+    expect(mock).toBeCalledTimes(5);
+    expect(b11).toBe(b12);
+
+    mock.mockReset();
+    await orm.em.flush();
+    expect(mock.mock.calls[0][0]).toMatch('begin');
+    expect(mock.mock.calls[1][0]).toMatch(/update `author2` set `email` = 'lol', `age` = 1000, `updated_at` = '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}' where `id` = 1/);
+    expect(mock.mock.calls[2][0]).toMatch('commit');
+
+    // TODO test with joined strategy
+    // TODO test with relations
   });
 
   test('batch update with changing OneToOne relation (GH issue #1025)', async () => {
